@@ -26,22 +26,24 @@ cargo build --target wasm32-unknown-unknown --release -p settlement_contract -p 
 SETTLEMENT_WASM="$ROOT_DIR/target/wasm32-unknown-unknown/release/settlement_contract.wasm"
 GOVERNANCE_WASM="$ROOT_DIR/target/wasm32-unknown-unknown/release/governance_contract.wasm"
 
+mkdir -p "$ROOT_DIR/.soroban"
+
 soroban contract deploy \
   --wasm "$SETTLEMENT_WASM" \
   --source-account "$SOROBAN_SOURCE" \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
-  >/tmp/bettapay_settlement_id.txt
+  >"$ROOT_DIR/.soroban/bettapay_settlement_id.txt"
 
 soroban contract deploy \
   --wasm "$GOVERNANCE_WASM" \
   --source-account "$SOROBAN_SOURCE" \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
-  >/tmp/bettapay_governance_id.txt
+  >"$ROOT_DIR/.soroban/bettapay_governance_id.txt"
 
-SETTLEMENT_ID="$(tr -d '\n' </tmp/bettapay_settlement_id.txt)"
-GOVERNANCE_ID="$(tr -d '\n' </tmp/bettapay_governance_id.txt)"
+SETTLEMENT_ID="$(tr -d '\n' <"$ROOT_DIR/.soroban/bettapay_settlement_id.txt")"
+GOVERNANCE_ID="$(tr -d '\n' <"$ROOT_DIR/.soroban/bettapay_governance_id.txt")"
 
 soroban contract invoke \
   --id "$SETTLEMENT_ID" \

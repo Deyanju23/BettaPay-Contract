@@ -18,6 +18,7 @@ enum DataKey {
     SystemParam(Symbol),
     FeeConfig,
     Anchor(Address),
+    Paused,
 }
 
 #[contracterror]
@@ -29,6 +30,7 @@ pub enum GovernanceError {
     Unauthorized = 3,
     InvalidFeeBps = 4,
     AnchorMissing = 5,
+    Paused = 6,
 }
 
 #[contract]
@@ -44,7 +46,37 @@ impl GovernanceContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
+    pub fn get_admin(env: Env) -> Address {
+        read_admin(&env)
+    }
+
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish((symbol_short!("admin"),), new_admin);
+    }
+
+    pub fn pause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("pause"),), true);
+    }
+
+    pub fn unpause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("unpause"),), false);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        is_paused(&env)
+    }
+
     pub fn update_system_param(env: Env, key: Symbol, value: i128) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
         env.storage()
@@ -59,6 +91,7 @@ impl GovernanceContract {
     }
 
     pub fn set_fee_config(env: Env, config: FeeConfig) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
 
@@ -78,6 +111,7 @@ impl GovernanceContract {
     }
 
     pub fn upsert_anchor(env: Env, asset: Address, anchor: Address) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
         env.storage()
@@ -87,6 +121,7 @@ impl GovernanceContract {
     }
 
     pub fn remove_anchor(env: Env, asset: Address) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
         let key = DataKey::Anchor(asset.clone());
@@ -109,6 +144,16 @@ fn read_admin(env: &Env) -> Address {
         .instance()
         .get(&DataKey::Admin)
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
+}
+
+fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+}
+
+fn assert_not_paused(env: &Env) {
+    if is_paused(env) {
+        panic_with_error!(env, GovernanceError::Paused);
+    }
 }
 
 #[cfg(test)]

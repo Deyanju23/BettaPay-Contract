@@ -9,7 +9,8 @@ const BPS_DENOMINATOR: i128 = 10_000;
 #[derive(Clone)]
 #[contracttype]
 pub struct SettlementRule {
-    pub fee_bps: u32,
+    pub platform_fee_bps: u32,
+    pub network_fee_bps: u32,
     pub settlement_delay_ledger: u32,
     pub auto_settle: bool,
 }
@@ -18,9 +19,9 @@ pub struct SettlementRule {
 #[contracttype]
 pub struct FeeSplit {
     pub gross_amount: i128,
-    pub fee_amount: i128,
+    pub platform_fee_amount: i128,
+    pub network_fee_amount: i128,
     pub merchant_amount: i128,
-    pub fee_bps: u32,
 }
 
 #[derive(Clone)]
@@ -28,10 +29,14 @@ pub struct FeeSplit {
 pub struct PaymentRecord {
     pub merchant: Address,
     pub amount: i128,
-    pub fee_amount: i128,
+    pub platform_fee_amount: i128,
+    pub network_fee_amount: i128,
     pub merchant_amount: i128,
-    pub fee_bps: u32,
+    pub platform_fee_bps: u32,
+    pub network_fee_bps: u32,
     pub ledger: u32,
+    pub settlement_delay_ledger: u32,
+    pub auto_settle: bool,
 }
 
 #[derive(Clone)]
@@ -41,6 +46,7 @@ enum DataKey {
     Merchant(Address),
     Rule(Address),
     Payment(BytesN<32>),
+    Paused,
 }
 
 #[contracterror]
@@ -55,6 +61,7 @@ pub enum SettlementError {
     InvalidFeeBps = 6,
     InvalidAmount = 7,
     DuplicatePaymentReference = 8,
+    Paused = 9,
 }
 
 #[contract]
@@ -70,7 +77,37 @@ impl SettlementContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
+    pub fn get_admin(env: Env) -> Address {
+        read_admin(&env)
+    }
+
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish((symbol_short!("admin"),), new_admin);
+    }
+
+    pub fn pause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("pause"),), true);
+    }
+
+    pub fn unpause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("unpause"),), false);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        is_paused(&env)
+    }
+
     pub fn register_merchant(env: Env, merchant: Address) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
 
@@ -85,13 +122,14 @@ impl SettlementContract {
     }
 
     pub fn set_settlement_rule(env: Env, merchant: Address, rule: SettlementRule) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
-        if rule.fee_bps > BPS_DENOMINATOR as u32 {
+        if rule.platform_fee_bps > BPS_DENOMINATOR as u32 || rule.network_fee_bps > BPS_DENOMINATOR as u32 {
             panic_with_error!(&env, SettlementError::InvalidFeeBps);
         }
 
@@ -99,10 +137,11 @@ impl SettlementContract {
             .persistent()
             .set(&DataKey::Rule(merchant.clone()), &rule.clone());
         env.events()
-            .publish((symbol_short!("set_rule"), merchant), rule.fee_bps);
+            .publish((symbol_short!("set_rule"), merchant), (rule.platform_fee_bps, rule.network_fee_bps));
     }
 
     pub fn store_payment_reference(env: Env, merchant: Address, reference: BytesN<32>, amount: i128) -> FeeSplit {
+        assert_not_paused(&env);
         merchant.require_auth();
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
@@ -118,14 +157,18 @@ impl SettlementContract {
         }
 
         let rule = read_rule_or_default(&env, merchant.clone());
-        let split = calculate_split(amount, rule.fee_bps);
+        let split = calculate_split(amount, &rule);
         let record = PaymentRecord {
             merchant: merchant.clone(),
             amount,
-            fee_amount: split.fee_amount,
+            platform_fee_amount: split.platform_fee_amount,
+            network_fee_amount: split.network_fee_amount,
             merchant_amount: split.merchant_amount,
-            fee_bps: rule.fee_bps,
+            platform_fee_bps: rule.platform_fee_bps,
+            network_fee_bps: rule.network_fee_bps,
             ledger: env.ledger().sequence(),
+            settlement_delay_ledger: rule.settlement_delay_ledger,
+            auto_settle: rule.auto_settle,
         };
 
         env.storage().persistent().set(&payment_key, &record);
@@ -133,7 +176,7 @@ impl SettlementContract {
             .publish((symbol_short!("payment"), merchant.clone()), reference);
         env.events().publish(
             (symbol_short!("split"), merchant),
-            (split.gross_amount, split.fee_amount, split.merchant_amount),
+            (split.gross_amount, split.platform_fee_amount, split.network_fee_amount, split.merchant_amount),
         );
 
         split
@@ -155,7 +198,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAmount);
         }
         let rule = read_rule_or_default(&env, merchant);
-        calculate_split(amount, rule.fee_bps)
+        calculate_split(amount, &rule)
     }
 
     pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentRecord> {
@@ -182,20 +225,32 @@ fn read_rule_or_default(env: &Env, merchant: Address) -> SettlementRule {
         .persistent()
         .get(&DataKey::Rule(merchant))
         .unwrap_or(SettlementRule {
-            fee_bps: 0,
+            platform_fee_bps: 100,
+            network_fee_bps: 0,
             settlement_delay_ledger: 0,
             auto_settle: false,
         })
 }
 
-fn calculate_split(amount: i128, fee_bps: u32) -> FeeSplit {
-    let fee_amount = amount * (fee_bps as i128) / BPS_DENOMINATOR;
-    let merchant_amount = amount - fee_amount;
+fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+}
+
+fn assert_not_paused(env: &Env) {
+    if is_paused(env) {
+        panic_with_error!(env, SettlementError::Paused);
+    }
+}
+
+fn calculate_split(amount: i128, rule: &SettlementRule) -> FeeSplit {
+    let platform_fee_amount = amount * (rule.platform_fee_bps as i128) / BPS_DENOMINATOR;
+    let network_fee_amount = amount * (rule.network_fee_bps as i128) / BPS_DENOMINATOR;
+    let merchant_amount = amount - platform_fee_amount - network_fee_amount;
     FeeSplit {
         gross_amount: amount,
-        fee_amount,
+        platform_fee_amount,
+        network_fee_amount,
         merchant_amount,
-        fee_bps,
     }
 }
 
@@ -231,7 +286,8 @@ mod tests {
         client.register_merchant(&merchant);
 
         let rule = SettlementRule {
-            fee_bps: 175,
+            platform_fee_bps: 175,
+            network_fee_bps: 25,
             settlement_delay_ledger: 42,
             auto_settle: true,
         };
@@ -242,7 +298,8 @@ mod tests {
             .get_settlement_rule(&merchant)
             .expect("expected settlement rule");
 
-        assert_eq!(got.fee_bps, 175);
+        assert_eq!(got.platform_fee_bps, 175);
+        assert_eq!(got.network_fee_bps, 25);
         assert_eq!(got.settlement_delay_ledger, 42);
         assert!(got.auto_settle);
         assert!(env.events().all().len() > before);
@@ -254,7 +311,8 @@ mod tests {
         client.register_merchant(&merchant);
 
         let rule = SettlementRule {
-            fee_bps: 250,
+            platform_fee_bps: 250,
+            network_fee_bps: 50,
             settlement_delay_ledger: 0,
             auto_settle: false,
         };
@@ -267,9 +325,11 @@ mod tests {
             .get_payment_reference(&reference)
             .expect("expected payment record");
 
-        assert_eq!(split.fee_amount, 500);
-        assert_eq!(split.merchant_amount, 19_500);
-        assert_eq!(stored.fee_bps, 250);
+        assert_eq!(split.platform_fee_amount, 500);
+        assert_eq!(split.network_fee_amount, 100);
+        assert_eq!(split.merchant_amount, 19_400);
+        assert_eq!(stored.platform_fee_bps, 250);
+        assert_eq!(stored.network_fee_bps, 50);
         assert_eq!(stored.amount, 20_000);
         assert!(env.events().all().len() >= before + 2);
     }
@@ -279,8 +339,9 @@ mod tests {
         let (_env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
         let split = client.calculate_fee_split(&merchant, &50_000);
-        assert_eq!(split.fee_amount, 0);
-        assert_eq!(split.merchant_amount, 50_000);
+        assert_eq!(split.platform_fee_amount, 500); // Because default is 100 bps
+        assert_eq!(split.network_fee_amount, 0);
+        assert_eq!(split.merchant_amount, 49_500);
     }
 
     #[test]
@@ -316,7 +377,8 @@ mod tests {
         let (_env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
         let bad_rule = SettlementRule {
-            fee_bps: 10_001,
+            platform_fee_bps: 10_001,
+            network_fee_bps: 0,
             settlement_delay_ledger: 0,
             auto_settle: false,
         };

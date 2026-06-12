@@ -22,8 +22,8 @@ BettaPay-Contract/
 
 | Contract     | Address                                                  |
 |-------------|----------------------------------------------------------|
-| Settlement  | `CC74K4KWT4ZSTDBGEYM2LT2N4H6R2HV7VA5HEWUQVPMHVDPL44EQSCNM` |
-| Governance  | `CATDQJ4O24SOWJHJFHA4GZCVBFSAAELJ62FXI7XSAMNQ753BOWHIM3LJ` |
+| Settlement  | `CBGBGKJSUY7XYB6HWW4CVAU6MW2KD25FSF45E5KCP53TKUK374MBZNFB` |
+| Governance  | `CDPFWUTIXF5BC6BKNDLSQOZSDQCXAJNZFCZWHBE2RRHANRN25T3ILPZ7` |
 | Admin       | `GCCHHKNI7GRA5QWC7RCTT3OHO7SKAUMKQA6IBWEQEO2SXI3GF376UHDD` |
 
 Network: `Test SDF Network ; September 2015`
