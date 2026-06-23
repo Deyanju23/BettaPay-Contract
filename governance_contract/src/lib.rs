@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address, BytesN, Env,
+    Symbol,
 };
 
 /// Minimum allowed fee in basis points (0.05%).
@@ -57,6 +58,31 @@ impl GovernanceContract {
 
     pub fn get_admin(env: Env) -> Address {
         read_admin(&env)
+    }
+
+    /// Upgrades the contract Wasm code to a new version.
+    ///
+    /// This function replaces only the contract's executable Wasm code;
+    /// all persistent and instance storage entries remain intact. A
+    /// separate storage-migration function should be written and called
+    /// after the upgrade if the new code expects a different schema.
+    ///
+    /// ### Events
+    /// - Emits `contract_upgraded` with topic
+    ///   `(Symbol("contract_upgraded"), new_wasm_hash)` and data
+    ///   `(caller)`.
+    ///
+    /// ### Panics
+    /// - If the caller is not the stored admin.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        env.events().publish(
+            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash),
+            admin,
+        );
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {
@@ -172,7 +198,8 @@ fn assert_not_paused(env: &Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{vec, Bytes, FromVal};
 
     fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
         let env = Env::default();
@@ -183,6 +210,35 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         client.init(&admin);
         (env, client, admin)
+    }
+
+    fn setup_no_mock() -> (Env, GovernanceContractClient<'static>, Address) {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id: Address = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        let invoke = MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "init",
+            args: vec![&env, admin.to_val()],
+            sub_invokes: &[],
+        };
+        let auth = MockAuth {
+            address: &admin,
+            invoke: &invoke,
+        };
+        env.set_auths(&[(&auth).into()]);
+        client.init(&admin);
+        (env, client, admin)
+    }
+
+    fn upload_test_wasm(env: &Env) -> BytesN<32> {
+        let wasm = Bytes::from_slice(
+            env,
+            include_bytes!("../../target/wasm32-unknown-unknown/release/governance_contract.wasm"),
+        );
+        env.deployer().upload_contract_wasm(wasm)
     }
 
     #[test]
