@@ -446,4 +446,63 @@ mod tests {
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.get_admin(), new_admin);
     }
+
+    #[test]
+    fn reports_pause_state_after_pause() {
+        let (env, client, admin) = setup();
+        assert!(!client.is_paused());
+        client.pause(&admin);
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn reports_unpause_state_after_unpause() {
+        let (env, client, admin) = setup();
+        client.pause(&admin);
+        assert!(client.is_paused());
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_update_system_param_when_paused() {
+        let (env, client, admin) = setup();
+        client.pause(&admin);
+        let key = Symbol::new(&env, "max_settle");
+        client.update_system_param(&admin, &key, &1440);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_set_fee_config_when_paused() {
+        let (env, client, admin) = setup();
+        client.pause(&admin);
+        let cfg = FeeConfig {
+            platform_fee_bps: 120,
+            network_fee_bps: 35,
+        };
+        client.set_fee_config(&admin, &cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_upsert_anchor_when_paused() {
+        let (env, client, admin) = setup();
+        client.pause(&admin);
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+        client.upsert_anchor(&admin, &asset, &anchor);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_remove_anchor_when_paused() {
+        let (env, client, admin) = setup();
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+        client.upsert_anchor(&admin, &asset, &anchor);
+        client.pause(&admin);
+        client.remove_anchor(&admin, &asset);
+    }
 }

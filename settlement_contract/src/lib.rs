@@ -1362,4 +1362,42 @@ mod tests {
 
         client.set_default_rule(&rule);
     }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn set_settlement_rule_rejects_unregistered_merchant() {
+        let (_env, client, _admin, merchant) = setup();
+
+        let rule = SettlementRule {
+            platform_fee_bps: 100,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+    }
+
+    #[test]
+    #[should_panic]
+    fn unpause_fails_for_non_admin() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id: Address = env.register_contract(None, SettlementContract);
+        let client = SettlementContractClient::new(&env, &contract_id);
+
+        let invoke = MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "init",
+            args: soroban_sdk::vec![&env, admin.to_val()],
+            sub_invokes: &[],
+        };
+        let auth = MockAuth {
+            address: &admin,
+            invoke: &invoke,
+        };
+        env.set_auths(&[(&auth).into()]);
+        client.init(&admin);
+
+        client.unpause();
+    }
 }
