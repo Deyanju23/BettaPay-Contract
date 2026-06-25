@@ -114,6 +114,11 @@ pub struct SettlementContract;
 
 #[contractimpl]
 impl SettlementContract {
+    /// Initialize the contract with the given admin address.
+    ///
+    /// # Panics
+    ///
+    /// * [`AlreadyInitialized`](SettlementError::AlreadyInitialized) — if the contract has already been initialized.
     pub fn init(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, SettlementError::AlreadyInitialized);
@@ -122,10 +127,27 @@ impl SettlementContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
+    /// Return the current admin address.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
     pub fn get_admin(env: Env) -> Address {
         read_admin(&env)
     }
 
+    /// Transfer the admin role to a new address.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`InvalidAddress`](SettlementError::InvalidAddress) — if `new_admin` is the zero address.
+    /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if `new_admin` is the same as the current admin.
+    ///
+    /// ## Emitted Event: `admin`
+    ///
+    /// **Topics**: `(Symbol("admin"),)`
+    /// **Data**: `Address new_admin`
     pub fn transfer_admin(env: Env, new_admin: Address) {
         let admin = read_admin(&env);
         admin.require_auth();
@@ -145,6 +167,17 @@ impl SettlementContract {
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
+    /// Pause the contract, preventing certain operations.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
+    ///
+    /// ## Emitted Event: `pause`
+    ///
+    /// **Topics**: `(Symbol("pause"),)`
+    /// **Data**: `bool true`
     pub fn pause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
@@ -152,6 +185,17 @@ impl SettlementContract {
         env.events().publish((symbol_short!("pause"),), true);
     }
 
+    /// Unpause the contract, re-enabling paused operations.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
+    ///
+    /// ## Emitted Event: `unpause`
+    ///
+    /// **Topics**: `(Symbol("unpause"),)`
+    /// **Data**: `bool false`
     pub fn unpause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
@@ -159,6 +203,7 @@ impl SettlementContract {
         env.events().publish((symbol_short!("unpause"),), false);
     }
 
+    /// Returns `true` if the contract is currently paused, `false` otherwise.
     pub fn is_paused(env: Env) -> bool {
         is_paused(&env)
     }
@@ -197,6 +242,19 @@ impl SettlementContract {
         );
     }
 
+    /// Remove a merchant from the registry and clear any associated settlement rule.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
+    ///
+    /// ## Emitted Event: `merchant`
+    ///
+    /// **Topics**: `(Symbol("merchant"), Address merchant)`
+    /// **Data**: `bool false`
     pub fn unregister_merchant(env: Env, merchant: Address) {
         assert_not_paused(&env);
         let admin = read_admin(&env);
@@ -333,10 +391,30 @@ impl SettlementContract {
         );
     }
 
+    /// Returns the global default settlement rule, if one has been set.
     pub fn get_default_rule(env: Env) -> Option<SettlementRule> {
         env.storage().persistent().get(&DataKey::DefaultRule)
     }
 
+    /// Store a payment reference for a merchant and calculate the fee split.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
+    /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
+    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is below the minimum.
+    /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
+    ///
+    /// ## Emitted Event: `payment_stored`
+    ///
+    /// **Topics**: `(Symbol("payment_stored"), Address merchant)`
+    /// **Data**: `(BytesN<32> reference, PaymentRecord record)`
+    ///
+    /// ## Emitted Event: `payment_split`
+    ///
+    /// **Topics**: `(Symbol("payment_split"), Address merchant)`
+    /// **Data**: `(i128 gross, i128 platform_fee, i128 network_fee, i128 merchant_amount)`
     pub fn store_payment_reference(
         env: Env,
         merchant: Address,
@@ -381,28 +459,11 @@ impl SettlementContract {
             .persistent()
             .extend_ttl(&payment_key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
 
-        /// ## Emitted Event: `payment_stored`
-        ///
-        /// **Topics**: `(Symbol("payment_stored"), Address merchant)`
-        /// - First topic: fixed event-name symbol for filtering by event type
-        /// - Second topic: the merchant address that stored the payment
-        ///
-        /// **Data**: `(BytesN<32> reference, PaymentRecord record)`
-        /// - `reference`: the unique payment reference identifier
-        /// - `record`: the full payment record including amounts, fees, and settlement info
         env.events().publish(
             (Symbol::new(&env, "payment_stored"), merchant.clone()),
             (reference.clone(), record),
         );
 
-        /// ## Emitted Event: `payment_split`
-        ///
-        /// **Topics**: `(Symbol("payment_split"), Address merchant)`
-        /// - First topic: fixed event-name symbol for filtering by event type
-        /// - Second topic: the merchant address for which the split was calculated
-        ///
-        /// **Data**: `(i128 gross_amount, i128 platform_fee_amount, i128 network_fee_amount, i128 merchant_amount)`
-        /// - The calculated fee breakdown for the payment in absolute units
         env.events().publish(
             (Symbol::new(&env, "payment_split"), merchant),
             (
@@ -416,14 +477,22 @@ impl SettlementContract {
         split
     }
 
+    /// Returns `true` if the given address is a registered merchant, `false` otherwise.
     pub fn is_merchant_registered(env: Env, merchant: Address) -> bool {
         is_merchant_registered_internal(&env, merchant)
     }
 
+    /// Returns the merchant-specific settlement rule, if one has been set.
     pub fn get_settlement_rule(env: Env, merchant: Address) -> Option<SettlementRule> {
         env.storage().persistent().get(&DataKey::Rule(merchant))
     }
 
+    /// Calculate the fee split for a given merchant and amount without storing a payment reference.
+    ///
+    /// # Panics
+    ///
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
+    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -435,6 +504,7 @@ impl SettlementContract {
         calculate_split(amount, &rule)
     }
 
+    /// Retrieve a payment record by its reference, extending the storage TTL if found.
     pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentRecord> {
         let key = DataKey::Payment(reference);
         let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
@@ -446,6 +516,9 @@ impl SettlementContract {
         record
     }
 
+    /// Retrieve multiple payment records by a vector of references.
+    ///
+    /// Missing references are silently skipped.
     pub fn get_payments(env: Env, references: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
         let mut payments = Vec::new(&env);
 
