@@ -494,11 +494,19 @@ fn assert_not_paused(env: &Env) {
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
 fn calculate_split(amount: i128, rule: &SettlementRule) -> FeeSplit {
-    // Fees are rounded up so the platform and network never under-collect.
+    // Integer arithmetic is used instead of floats to ensure deterministic, reproducible smart contract execution.
+    // Standard integer division (`/`) truncates fractions toward zero, causing precision loss and under-collecting fees.
+    // To prevent fee under-collection, ceiling division is simulated by adding `BPS_DENOMINATOR - 1` to the numerator.
+    // Edge case: For small amounts, ceil rounding can force fees to 1 unit even when the basis points represent a tiny fraction.
     let platform_fee_amount =
         (amount * (rule.platform_fee_bps as i128) + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
     let network_fee_amount =
         (amount * (rule.network_fee_bps as i128) + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
+
+    // The merchant amount is calculated as the subtraction remainder of the gross amount minus all rounded-up fees.
+    // This ensures the sum of the split amounts (platform fee + network fee + merchant share) always equals the gross amount.
+    // Consequence: The merchant absorbs all rounding dust. For very small gross amounts with high/extreme fee percentages,
+    // the sum of rounded-up fees can exceed the gross amount, resulting in a negative merchant payout.
     let merchant_amount = amount - platform_fee_amount - network_fee_amount;
     FeeSplit {
         gross_amount: amount,
