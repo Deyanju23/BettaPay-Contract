@@ -106,6 +106,16 @@ pub struct FeeConfig {
     pub network_fee_bps: u32,
 }
 
+/// Structured payload for the `admin_transferred` event, so off-chain
+/// consumers can read `old_admin`/`new_admin` by name instead of having to
+/// know the positional order of an anonymous tuple.
+#[derive(Clone)]
+#[contracttype]
+pub struct AdminTransferred {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
@@ -134,6 +144,7 @@ pub enum GovernanceError {
     Paused = 6,
     /// The provided admin address is invalid (e.g., zero address or same as current admin).
     InvalidAdmin = 7,
+    InvalidParamValue = 8,
 }
 
 #[contract]
@@ -269,7 +280,13 @@ impl GovernanceContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.events().publish((symbol_short!("admin"),), new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin: admin,
+                new_admin,
+            },
+        );
     }
 
     /// Pauses the contract, blocking all state-mutating operations.
@@ -375,17 +392,30 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn update_system_param(env: Env, caller: Address, key: Symbol, value: i128) {
-        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
-        env.storage()
-            .persistent()
-            .set(&DataKey::SystemParam(key.clone()), &value);
-        env.events()
-            .publish((symbol_short!("sys_param"), key), value);
+
+        if value < 0 {
+            panic_with_error!(&env, GovernanceError::InvalidParamValue);
+        }
+
+        let storage_key = DataKey::SystemParam(key.clone());
+        let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
+
+        env.storage().persistent().set(&storage_key, &value);
+
+        // Structured for off-chain indexing: topics carry the event name and
+        // the specific parameter key (so indexers can filter per-parameter),
+        // and the data payload carries who made the change and the full
+        // before/after value, so the change is auditable without needing to
+        // separately diff storage reads.
+        env.events().publish(
+            (Symbol::new(&env, "sys_param_updated"), key),
+            (admin, previous_value, value),
+        );
     }
 
     /// Retrieves a stored system parameter by key.
@@ -444,7 +474,6 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn set_fee_config(env: Env, caller: Address, config: FeeConfig) {
-        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
@@ -513,7 +542,6 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn upsert_anchor(env: Env, caller: Address, asset: Address, anchor: Address) {
-        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
@@ -557,7 +585,6 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn remove_anchor(env: Env, caller: Address, asset: Address) {
-        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
@@ -899,6 +926,118 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #8)")]
+    fn rejects_negative_system_param_value() {
+        let (env, client, admin) = setup();
+        let key = Symbol::new(&env, "max_settle");
+        client.update_system_param(&admin, &key, &-1);
+    }
+
+    #[test]
+    fn accepts_zero_system_param_value() {
+        let (env, client, admin) = setup();
+        let key = Symbol::new(&env, "max_settle");
+        client.update_system_param(&admin, &key, &0);
+        assert_eq!(client.get_system_param(&key), Some(0));
+    }
+
+    #[test]
+    fn emits_structured_event_when_updating_system_param() {
+        let (env, client, admin) = setup();
+        let key = Symbol::new(&env, "max_settle");
+
+        // First update: no previous value should exist yet.
+        let prev_count = env.events().all().len();
+        client.update_system_param(&admin, &key, &1440);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
+
+        let (_contract_id, topics, data) = events.get(prev_count).unwrap();
+
+        assert_eq!(topics.len(), 2);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "sys_param_updated")
+        );
+        assert_eq!(Symbol::from_val(&env, &topics.get(1).unwrap()), key);
+
+        let (event_admin, previous_value, new_value) =
+            <(Address, Option<i128>, i128)>::from_val(&env, &data);
+        assert_eq!(event_admin, admin);
+        assert_eq!(previous_value, None);
+        assert_eq!(new_value, 1440);
+
+        // Second update: previous_value should now reflect the prior write.
+        let prev_count = env.events().all().len();
+        client.update_system_param(&admin, &key, &2880);
+
+        let events = env.events().all();
+        let (_contract_id, _topics, data) = events.get(prev_count).unwrap();
+        let (_event_admin, previous_value, new_value) =
+            <(Address, Option<i128>, i128)>::from_val(&env, &data);
+        assert_eq!(previous_value, Some(1440));
+        assert_eq!(new_value, 2880);
+    }
+
+    #[test]
+    fn emits_structured_event_when_transferring_admin() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        let prev_count = env.events().all().len();
+        client.transfer_admin(&admin, &new_admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
+
+        let (_contract_id, topics, data) = events.get(prev_count).unwrap();
+
+        assert_eq!(topics.len(), 1);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "admin_transferred")
+        );
+
+        // Data is the named AdminTransferred struct, not an anonymous tuple -
+        // off-chain consumers read old_admin/new_admin by field name.
+        let payload = AdminTransferred::from_val(&env, &data);
+        assert_eq!(payload.old_admin, admin);
+        assert_eq!(payload.new_admin, new_admin);
+    }
+    
+    #[test]
+    fn admin_functions_work_while_paused() {
+        let (env, client, admin) = setup();
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        // None of these should panic while paused - the admin must be able
+        // to resolve issues during a pause, not be locked out of it.
+        let key = Symbol::new(&env, "max_settle");
+        client.update_system_param(&admin, &key, &1440);
+        assert_eq!(client.get_system_param(&key), Some(1440));
+
+        let cfg = FeeConfig {
+            platform_fee_bps: 120,
+            network_fee_bps: 35,
+        };
+        client.set_fee_config(&admin, &cfg);
+        assert_eq!(client.get_fee_config().unwrap().platform_fee_bps, 120);
+
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+        client.upsert_anchor(&admin, &asset, &anchor);
+        assert_eq!(client.get_anchor(&asset), Some(anchor));
+
+        client.remove_anchor(&admin, &asset);
+        assert_eq!(client.get_anchor(&asset), None);
+
+        // Still paused throughout - none of the above silently unpaused it.
+        assert!(client.is_paused());
     }
 
     #[test]
