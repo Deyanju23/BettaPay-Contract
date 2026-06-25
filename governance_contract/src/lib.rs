@@ -433,6 +433,18 @@ mod tests {
     }
 
     #[test]
+    fn system_param_key_uniqueness_overwrites_existing_value() {
+        let (env, client, admin) = setup();
+        let key = Symbol::new(&env, "test_param");
+
+        client.update_system_param(&admin, &key, &100);
+        assert_eq!(client.get_system_param(&key), Some(100));
+
+        client.update_system_param(&admin, &key, &200);
+        assert_eq!(client.get_system_param(&key), Some(200));
+    }
+
+    #[test]
     #[should_panic(expected = "Error(Contract, #7)")]
     fn rejects_same_admin_transfer() {
         let (_env, client, admin) = setup();
