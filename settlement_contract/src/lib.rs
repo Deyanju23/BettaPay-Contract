@@ -1900,6 +1900,63 @@ mod tests {
         assert_eq!(split.merchant_amount, 92_500);
     }
 
+    // Issue #75: verify pause flag changes state in settlement contract
+    #[test]
+    fn pause_flag_changes_state() {
+        let (_env, client, _admin, _merchant) = setup();
+        assert!(!client.is_paused());
+        client.pause();
+        assert!(client.is_paused());
+        client.unpause();
+        assert!(!client.is_paused());
+    }
+
+    // Issue #73: verify non-admins cannot pause the settlement contract
+    #[test]
+    #[should_panic]
+    fn pause_rejected_for_non_admin() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, SettlementContract);
+        let client = SettlementContractClient::new(&env, &contract_id);
+
+        let init_invoke = MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "init",
+            args: soroban_sdk::vec![&env, admin.to_val()],
+            sub_invokes: &[],
+        };
+        let init_auth = MockAuth {
+            address: &admin,
+            invoke: &init_invoke,
+        };
+        env.set_auths(&[(&init_auth).into()]);
+        client.init(&admin);
+
+        let pause_invoke = MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "pause",
+            args: soroban_sdk::vec![&env],
+            sub_invokes: &[],
+        };
+        let pause_auth = MockAuth {
+            address: &non_admin,
+            invoke: &pause_invoke,
+        };
+        env.set_auths(&[(&pause_auth).into()]);
+        client.pause();
+    }
+
+    // Issue #82: verify storing reference for non-merchant panics with MerchantMissing
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn store_payment_reference_fails_for_unregistered_merchant() {
+        let (env, client, _admin, merchant) = setup();
+        let reference = BytesN::from_array(&env, &[99; 32]);
+        client.store_payment_reference(&merchant, &reference, &10_000);
+    }
+
     // Verify event emitted on admin transfer
     #[test]
     fn emits_event_on_admin_transfer() {

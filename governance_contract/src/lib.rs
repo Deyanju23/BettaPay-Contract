@@ -1096,6 +1096,32 @@ mod tests {
         client.update_system_param(&non_admin, &key, &1440);
     }
 
+    // Issue #52: verify only current admin can transfer admin
+    #[test]
+    #[should_panic]
+    fn rejects_transfer_admin_non_admin() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        env.mock_all_auths();
+        client.init(&admin);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "transfer_admin",
+                args: vec![&env, non_admin.to_val(), new_admin.to_val()],
+                sub_invokes: &[],
+            },
+        }]);
+        client.transfer_admin(&non_admin, &new_admin);
+    }
+
     #[test]
     #[should_panic(expected = "Error(Contract, #3)")]
     fn unpause_requires_admin_auth() {
